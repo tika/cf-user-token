@@ -13,6 +13,16 @@ npm ci
 ./cf-token.mjs --help
 ```
 
+## Discover scopes
+
+```sh
+cf-token help
+cf-token scopes
+cf-token scopes --json
+```
+
+These commands run without Chrome. Use `scopes --json` for machine-readable scope names, resource flags, example permissions, and access labels. Scope names describe what the permission applies to. Use the [Cloudflare permission reference](https://developers.cloudflare.com/fundamentals/api/reference/permissions/) to find groups and `--dry-run` to validate the exact dashboard labels.
+
 ## Create a token
 
 ```sh

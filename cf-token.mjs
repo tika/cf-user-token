@@ -6,7 +6,34 @@ import { parseArgs } from 'node:util'
 
 import { accessLevels, createUserToken, previewUserToken } from './dist/index.js'
 
+const scopes = [
+  {
+    name: 'account',
+    description: 'Permissions for a Cloudflare account',
+    resource: '--account NAME',
+    example: 'Account:Workers Scripts:Edit',
+  },
+  {
+    name: 'zone',
+    description: 'Permissions for a domain',
+    resource: '--zone DOMAIN',
+    example: 'Zone:DNS:Read',
+  },
+  {
+    name: 'user',
+    description: 'Permissions for the signed-in Cloudflare user',
+    resource: null,
+    example: 'User:User Details:Read',
+  },
+]
+const permissionReference = 'https://developers.cloudflare.com/fundamentals/api/reference/permissions/'
+const scopeHelp = 'Usage: cf-token scopes [--json]'
+
 const help = `Usage: cf-token --name NAME --permission "SCOPE:GROUP:ACCESS" [options]
+
+  cf-token help             Show usage
+  cf-token scopes           List scopes, resource flags, and examples
+  cf-token scopes --json    List the same metadata as JSON
 
 Repeat --permission to grant multiple permissions. Use Account, Zone, or User
 for SCOPE and the dashboard's exact permission group and access labels.
@@ -27,8 +54,32 @@ Keep the token out of chat, logs, and command arguments.
   cf-token --name "DNS reporting" --permission "Zone:DNS:Read" \\
     --zone example.com --stdout | your-secret-consumer`
 
-function readOptions() {
+function listScopes(args) {
   const { values } = parseArgs({
+    args,
+    options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+  })
+  if (values.help) {
+    console.log(scopeHelp)
+    return
+  }
+  if (values.json) {
+    console.log(JSON.stringify({ scopes, accessLevels, permissionReference }, null, 2))
+    return
+  }
+
+  console.log('Scopes for --permission "SCOPE:GROUP:ACCESS"\n')
+  for (const { name, description, resource, example } of scopes) {
+    console.log(`  ${name.padEnd(8)} ${description}`)
+    console.log(`           Resource: ${resource ?? 'signed-in user (no flag)'} | Example: "${example}"`)
+  }
+  console.log(`\nAccess labels: ${accessLevels.join(', ')} (availability varies by group)`)
+  console.log(`Permission group reference: ${permissionReference}`)
+}
+
+function readOptions(args) {
+  const { values } = parseArgs({
+    args,
     options: {
       name: { type: 'string' },
       permission: { type: 'string', multiple: true },
@@ -51,7 +102,7 @@ function readOptions() {
     const scope = parts.shift()?.trim().toLowerCase()
     const access = parts.pop()?.trim()
     const group = parts.join(':').trim()
-    if (!['account', 'zone', 'user'].includes(scope) || !group || !accessLevels.includes(access)) {
+    if (!scopes.some(({ name }) => name === scope) || !group || !accessLevels.includes(access)) {
       throw new Error('Use --permission "SCOPE:GROUP:ACCESS", for example "Zone:DNS:Read".')
     }
     if (!groups.has(scope)) groups.set(scope, [])
@@ -81,8 +132,17 @@ function readOptions() {
   return { name: values.name.trim(), policies, expires, dryRun: values['dry-run'], stdout: values.stdout }
 }
 
-try {
-  const options = readOptions()
+async function main(args) {
+  if (args.length === 0 || (args.length === 1 && args[0] === 'help')) {
+    console.log(help)
+    return
+  }
+  if (args[0] === 'scopes') {
+    listScopes(args.slice(1))
+    return
+  }
+
+  const options = readOptions(args)
   if (!options) console.log(help)
   else if (options.dryRun) {
     await previewUserToken(options)
@@ -98,6 +158,10 @@ try {
       throw new Error('Cloudflare created the token, but delivery through the pipe failed. Check the token list before retrying.')
     }
   }
+}
+
+try {
+  await main(process.argv.slice(2))
 } catch (error) {
   console.error(`cf-token: ${error.message}`)
   process.exitCode = 1
