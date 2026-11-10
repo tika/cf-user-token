@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { fstatSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -27,6 +29,10 @@ const scopes = [
   },
 ]
 const permissionReference = 'https://developers.cloudflare.com/fundamentals/api/reference/permissions/'
+const r2BucketUploads = {
+  guidance: 'For single-bucket S3 uploads, choose Object Read & Write and select the bucket in the R2 API token dashboard.',
+  reference: 'https://developers.cloudflare.com/r2/api/tokens/',
+}
 const scopeHelp = 'Usage: cf-token scopes [--json]'
 
 const help = `Usage: cf-token --name NAME --permission "SCOPE:GROUP:ACCESS" [options]
@@ -42,17 +48,19 @@ for SCOPE and the dashboard's exact permission group and access labels.
   --zone DOMAIN      Restrict Zone permissions to this domain
   --expires DAYS     7 (default), 30, 90, 365, or never
   --dry-run          Open the dashboard summary without creating a token
-  --stdout           Send the token through a pipe to a trusted stdin consumer
+  --pipe-to COMMAND [ARG...]  Send the token directly to a trusted command (put last)
+  --stdout           Send the token through a shell pipe to a trusted stdin consumer
   --help             Show this help
 
 Use --account all or --zone all to explicitly grant access to all resources
 of that scope.
 
-To issue a token, use --stdout and pipe directly to a trusted consumer.
+To issue a token, prefer --pipe-to. The consumer receives the token on stdin.
+Its output is suppressed, and its exit status determines delivery success.
 Keep the token out of chat, logs, and command arguments.
 
   cf-token --name "DNS reporting" --permission "Zone:DNS:Read" \\
-    --zone example.com --stdout | your-secret-consumer`
+    --zone example.com --pipe-to your-secret-consumer`
 
 function listScopes(args) {
   const { values } = parseArgs({
@@ -64,7 +72,7 @@ function listScopes(args) {
     return
   }
   if (values.json) {
-    console.log(JSON.stringify({ scopes, accessLevels, permissionReference }, null, 2))
+    console.log(JSON.stringify({ scopes, accessLevels, permissionReference, r2BucketUploads }, null, 2))
     return
   }
 
@@ -75,6 +83,7 @@ function listScopes(args) {
   }
   console.log(`\nAccess labels: ${accessLevels.join(', ')} (availability varies by group)`)
   console.log(`Permission group reference: ${permissionReference}`)
+  console.log(`\n${r2BucketUploads.guidance}\n${r2BucketUploads.reference}`)
 }
 
 function readOptions(args) {
@@ -132,6 +141,35 @@ function readOptions(args) {
   return { name: values.name.trim(), policies, expires, dryRun: values['dry-run'], stdout: values.stdout }
 }
 
+async function issueToConsumer(options, [command, ...args]) {
+  // The secret goes to stdin only. Suppress child output, including shell tracing.
+  const consumer = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'] })
+  const closed = once(consumer, 'close').catch(() => [null])
+  try {
+    try {
+      await once(consumer, 'spawn')
+    } catch {
+      throw new Error('Could not start the --pipe-to command. No token was created.')
+    }
+    if (consumer.exitCode !== null || consumer.signalCode !== null || consumer.stdin.destroyed) {
+      throw new Error('The --pipe-to command closed before token creation. No token was created.')
+    }
+
+    const token = await createUserToken(options)
+    const delivered = await pipeline(Readable.from([token + '\n']), consumer.stdin)
+      .then(() => true, () => false)
+    const [code, signal] = await closed
+    if (!delivered || code !== 0) {
+      const status = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`
+      throw new Error(`Cloudflare created the token, but the consumer failed (${status}). Check the destination and token list before retrying.`)
+    }
+    console.error('Token delivered. The consumer exited successfully.')
+  } finally {
+    consumer.stdin.destroy()
+    if (consumer.exitCode === null && consumer.signalCode === null) consumer.kill()
+  }
+}
+
 async function main(args) {
   if (args.length === 0 || (args.length === 1 && args[0] === 'help')) {
     console.log(help)
@@ -142,14 +180,24 @@ async function main(args) {
     return
   }
 
-  const options = readOptions(args)
+  const pipeToIndex = args.indexOf('--pipe-to')
+  const consumer = pipeToIndex === -1 ? undefined : args.slice(pipeToIndex + 1)
+  const options = readOptions(consumer ? args.slice(0, pipeToIndex) : args)
+  if (consumer && (!consumer[0] || consumer[0].startsWith('-'))) {
+    throw new Error('Supply a command after --pipe-to.')
+  }
+  if (consumer && (options?.stdout || options?.dryRun)) {
+    throw new Error('Use --pipe-to by itself for delivery, without --stdout or --dry-run.')
+  }
   if (!options) console.log(help)
   else if (options.dryRun) {
     await previewUserToken(options)
     console.error('Dry run. Review the token summary in Chrome.')
+  } else if (consumer) {
+    await issueToConsumer(options, consumer)
   } else {
     if (!options.stdout || !fstatSync(process.stdout.fd).isFIFO()) {
-      throw new Error('Token creation requires --stdout and a pipe to a trusted stdin consumer. See --help.')
+      throw new Error('Token creation requires --pipe-to COMMAND or --stdout with a pipe to a trusted stdin consumer. See --help.')
     }
     const token = await createUserToken(options)
     try {

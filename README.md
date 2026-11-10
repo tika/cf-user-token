@@ -34,20 +34,23 @@ Check the summary in Chrome. Repeat `--permission` to add permissions using the 
 
 ## Deliver the token securely
 
-Before creating a token, choose a trusted program that reads the secret from stdin, such as your secret manager or the program that needs the token. Replace `your-secret-consumer` with its stdin command.
+Before creating a token, choose a trusted program that reads the secret from stdin, such as your secret manager or the program that needs the token. Put `--pipe-to` last, followed by the executable and its arguments.
 
 ```sh
-set -o pipefail
-./cf-token.mjs --name 'DNS reporting' \
-  --permission 'Zone:DNS:Read' --zone example.com --stdout |
-  your-secret-consumer
+cf-token --name 'DNS reporting' \
+  --permission 'Zone:DNS:Read' --zone example.com \
+  --pipe-to your-secret-consumer
 ```
 
-The CLI requires both `--stdout` and a pipe before it opens Chrome for issuance. The pipe carries only the token. Diagnostics go to stderr. The CLI can check for a pipe, but the caller is responsible for choosing a consumer that keeps the token out of output and logs.
+The CLI starts the consumer before creating the token, passes the secret on stdin, suppresses the consumer's output, and checks its exit status. A consumer must exit nonzero if it cannot store or use the secret. For a shell pipeline, use `set -o pipefail` and `--stdout | your-secret-consumer`.
 
-**For agents:** Run the full pipeline in one shell call. Keep the token out of chat, tool output, shell command arguments, and logs. Avoid `tee`, command substitution, and plaintext files. If the destination is unclear, use `--dry-run` until you have a trusted consumer.
+**For agents:** Prefer `--pipe-to` and use `--dry-run` until you know the intended scope and secret destination. Keep the secret out of chat, tool output, shell command arguments, and logs. Avoid `tee`, command substitution, and plaintext files.
 
 Cloudflare shows the secret once. If issuance or delivery fails, check the dashboard and the destination before retrying. Revoke any token whose secret was lost or exposed.
+
+## R2 bucket uploads
+
+For S3-compatible uploads to one bucket, use **R2 Object Storage → Manage API Tokens → Object Read & Write → Apply to specific buckets only**. The account-level `Workers R2 Storage:Edit` permission also allows bucket administration. This CLI creates general user API tokens and does not create bucket-scoped R2 credentials. See [Cloudflare R2 authentication](https://developers.cloudflare.com/r2/api/tokens/) for the Access Key ID and Secret Access Key.
 
 ## TypeScript API
 
