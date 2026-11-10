@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { fstatSync } from 'node:fs'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { parseArgs } from 'node:util'
 
 import { accessLevels, createUserToken, previewUserToken } from './dist/index.js'
@@ -12,10 +15,17 @@ for SCOPE and the dashboard's exact permission group and access labels.
   --zone DOMAIN      Restrict Zone permissions to this domain
   --expires DAYS     7 (default), 30, 90, 365, or never
   --dry-run          Open the dashboard summary without creating a token
+  --stdout           Send the token through a pipe to a trusted stdin consumer
   --help             Show this help
 
 Use --account all or --zone all to explicitly grant access to all resources
-of that scope. On success the token is written to stdout.`
+of that scope.
+
+To issue a token, use --stdout and pipe directly to a trusted consumer.
+Keep the token out of chat, logs, and command arguments.
+
+  cf-token --name "DNS reporting" --permission "Zone:DNS:Read" \\
+    --zone example.com --stdout | your-secret-consumer`
 
 function readOptions() {
   const { values } = parseArgs({
@@ -26,6 +36,7 @@ function readOptions() {
       zone: { type: 'string' },
       expires: { type: 'string', default: '7' },
       'dry-run': { type: 'boolean' },
+      stdout: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   })
@@ -64,7 +75,10 @@ function readOptions() {
     throw new Error('Use --expires 7, 30, 90, 365, or never.')
   }
   const expires = values.expires === 'never' ? 'never' : Number(values.expires)
-  return { name: values.name.trim(), policies, expires, dryRun: values['dry-run'] }
+  if (values['dry-run'] && values.stdout) {
+    throw new Error('Use either --dry-run or --stdout.')
+  }
+  return { name: values.name.trim(), policies, expires, dryRun: values['dry-run'], stdout: values.stdout }
 }
 
 try {
@@ -74,8 +88,15 @@ try {
     await previewUserToken(options)
     console.error('Dry run. Review the token summary in Chrome.')
   } else {
+    if (!options.stdout || !fstatSync(process.stdout.fd).isFIFO()) {
+      throw new Error('Token creation requires --stdout and a pipe to a trusted stdin consumer. See --help.')
+    }
     const token = await createUserToken(options)
-    process.stdout.write(`${token}\n`)
+    try {
+      await pipeline(Readable.from([token + '\n']), process.stdout)
+    } catch {
+      throw new Error('Cloudflare created the token, but delivery through the pipe failed. Check the token list before retrying.')
+    }
   }
 } catch (error) {
   console.error(`cf-token: ${error.message}`)

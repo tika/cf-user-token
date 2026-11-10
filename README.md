@@ -1,6 +1,6 @@
 # cf-token
 
-Create a Cloudflare **user API token** using the dashboard session already signed in to Chrome. The CLI drives the dashboard through Playwriter and returns the new token on stdout.
+Create a Cloudflare **user API token** using the dashboard session already signed in to Chrome. The CLI drives the dashboard through Playwriter and delivers new tokens through an explicit pipe to a trusted consumer.
 
 ## Setup
 
@@ -20,23 +20,28 @@ npm ci
   --permission 'Zone:DNS:Read' --zone example.com --dry-run
 ```
 
-Check the summary in Chrome, then remove `--dry-run` to create the token. Repeat `--permission` to add permissions. Use the dashboard's exact group and access labels, such as `User:User Details:Read` or `Account:Workers Scripts:Edit`. Provide a domain for Zone permissions and the dashboard account name for Account permissions. Use `all` only when you intend to include every resource in that scope.
+Check the summary in Chrome. Repeat `--permission` to add permissions using the dashboard's exact group and access labels, such as `User:User Details:Read` or `Account:Workers Scripts:Edit`. Provide a domain for Zone permissions and the dashboard account name for Account permissions. Use `all` only when you intend to include every resource in that scope. Tokens expire after seven days by default.
 
-Tokens expire after seven days by default. Run `--help` for the other supported expiry options.
+## Deliver the token securely
 
-Pipe stdout directly to a secret manager or another trusted process when scripting. For example, if you already use the 2password CLI:
+Before creating a token, choose a trusted program that reads the secret from stdin, such as your secret manager or the program that needs the token. Replace `your-secret-consumer` with its stdin command.
 
 ```sh
+set -o pipefail
 ./cf-token.mjs --name 'DNS reporting' \
-  --permission 'Zone:DNS:Read' --zone example.com |
-  2password create api-credential --title 'Cloudflare DNS Reporting' --vault Work --stdin
+  --permission 'Zone:DNS:Read' --zone example.com --stdout |
+  your-secret-consumer
 ```
 
-Cloudflare shows the secret once. The CLI leaves the dashboard tab open if creation was attempted but the secret could not be returned. Check the tab and token list before retrying.
+The CLI requires both `--stdout` and a pipe before it opens Chrome for issuance. The pipe carries only the token. Diagnostics go to stderr. The CLI can check for a pipe, but the caller is responsible for choosing a consumer that keeps the token out of output and logs.
+
+**For agents:** Run the full pipeline in one shell call. Keep the token out of chat, tool output, shell command arguments, and logs. Avoid `tee`, command substitution, and plaintext files. If the destination is unclear, use `--dry-run` until you have a trusted consumer.
+
+Cloudflare shows the secret once. If issuance or delivery fails, check the dashboard and the destination before retrying. Revoke any token whose secret was lost or exposed.
 
 ## TypeScript API
 
-From this repo after `npm ci`, import the built module. The API uses a discriminated union for `account`, `zone`, and `user` policies. Account and zone policies require a matching resource or `{ all: true }`. Permission group names match the dashboard and the API validates them before creation.
+From this repo after `npm ci`, import the built module. The API uses a discriminated union for `account`, `zone`, and `user` policies. Account and zone policies require a matching resource or `{ all: true }`. Permission group names match the dashboard and the API validates them before creation. The API returns the secret as a string. Pass it directly to your secret store or client and keep it out of logs.
 
 ```ts
 import { previewUserToken, type Options } from './dist/index.js'
@@ -52,5 +57,5 @@ const options = {
 } satisfies Options
 
 await previewUserToken(options)
-// When ready to issue, call createUserToken(options). It returns Promise<string>.
+// Call createUserToken(options) only when you can pass the result directly to a trusted consumer.
 ```
