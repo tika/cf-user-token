@@ -72,7 +72,7 @@ async function buildSummary(page: Page, options: Options) {
   }
   await role('button', 'Create Token').click()
   const name = role('textbox', 'Token name')
-  await name.click()
+  await name.click({ noWaitAfter: true })
   await name.fill(options.name)
 
   let first = true
@@ -154,23 +154,52 @@ function postSubmitReason(cause: unknown): string {
   const timeout = /^(?:[a-z]+\.[a-z]+: )?Timeout (\d+)ms exceeded\b/i.exec(cause.message)
   if (timeout) return `timeout after ${timeout[1]} ms`
   if (cause.name === 'TimeoutError') return 'timeout'
+  if (/^Token verification (?:returned HTTP [0-9]{3}|did not return a token ID)$/.test(cause.message)) {
+    return cause.message
+  }
   if (cause.message.includes('Target page, context or browser has been closed')) return 'browser connection closed'
   const { code } = cause as NodeJS.ErrnoException
   if (code && /^ERR_OSSL_[A-Z0-9_]+$/.test(code)) return code
   return 'unexpected error'
 }
 
-export async function previewUserToken(options: Options): Promise<void> {
-  await run(options, true)
+export interface IssuedUserToken {
+  id: string
+  value: string
+}
+
+async function verifyTokenId(value: string): Promise<string> {
+  const response = await fetch('https://api.cloudflare.com/client/v4/user/tokens/verify', {
+    headers: { Authorization: `Bearer ${value}` },
+    redirect: 'error',
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!response.ok) throw new Error(`Token verification returned HTTP ${response.status}`)
+  const body = await response.json()
+  const id: unknown = body?.result?.id
+  if (body?.success !== true || typeof id !== 'string' || !/^[a-f0-9]{32}$/i.test(id)) {
+    throw new Error('Token verification did not return a token ID')
+  }
+  return id
+}
+
+export async function previewUserToken(options: Options, { closeTab = false } = {}): Promise<void> {
+  await run(options, closeTab ? 'preview-close' : 'preview')
 }
 
 export async function createUserToken(options: Options): Promise<string> {
-  return run(options, false)
+  return run(options, 'token')
 }
 
-function run(options: Options, dryRun: true): Promise<void>
-function run(options: Options, dryRun: false): Promise<string>
-async function run(options: Options, dryRun: boolean): Promise<string | void> {
+export async function createUserTokenWithId(options: Options): Promise<IssuedUserToken> {
+  return run(options, 'token-with-id')
+}
+
+type PreviewMode = 'preview' | 'preview-close'
+function run(options: Options, mode: PreviewMode): Promise<void>
+function run(options: Options, mode: 'token'): Promise<string>
+function run(options: Options, mode: 'token-with-id'): Promise<IssuedUserToken>
+async function run(options: Options, mode: PreviewMode | 'token' | 'token-with-id'): Promise<void | string | IssuedUserToken> {
   validate(options)
   const { connectViaExtension } = await import('playwriter')
   const connection = await connectViaExtension({ tabGroup: 'cloudflare', closeTabsOnEnd: false })
@@ -182,8 +211,13 @@ async function run(options: Options, dryRun: boolean): Promise<string | void> {
     page = await context.newPage()
     page.setDefaultTimeout(10000)
     await buildSummary(page, options)
-    if (dryRun) {
+    if (mode === 'preview') {
       keepTab = true
+      return
+    }
+    if (mode === 'preview-close') {
+      await page.close()
+      page = undefined
       return
     }
 
@@ -202,9 +236,11 @@ async function run(options: Options, dryRun: boolean): Promise<string | void> {
       stage = 'waiting for and reading the token from the Cloudflare success screen'
       const ciphertext = await readToken(page, publicKey.export({ format: 'jwk' }), options.name)
       stage = 'decrypting the token received from Chrome'
-      const token = privateDecrypt({ key: privateKey, oaepHash: 'sha256' }, ciphertext)
+      const value = privateDecrypt({ key: privateKey, oaepHash: 'sha256' }, ciphertext).toString('utf8')
+      stage = 'looking up the token ID with Cloudflare'
+      const result = mode === 'token-with-id' ? { id: await verifyTokenId(value), value } : value
       keepTab = false
-      return token.toString('utf8')
+      return result
     } catch (cause) {
       // Browser errors can include page content. Retain the cause for API callers.
       const reason = postSubmitReason(cause)

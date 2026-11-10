@@ -30,7 +30,7 @@ These commands run without Chrome. Use `scopes --json` for machine-readable scop
   --permission 'Zone:DNS:Read' --zone example.com --dry-run
 ```
 
-Check the summary in Chrome. Repeat `--permission` to add permissions using the dashboard's exact group and access labels, such as `User:User Details:Read` or `Account:Workers Scripts:Edit`. Provide a domain for Zone permissions and the dashboard account name for Account permissions. Use `all` only when you intend to include every resource in that scope. Tokens expire after seven days by default.
+Check the summary in Chrome and close the tab when finished. For validation without keeping a review tab, use `--dry-run --close-tab`. Repeat `--permission` to add permissions using the dashboard's exact group and access labels, such as `User:User Details:Read` or `Account:Workers Scripts:Edit`. Provide a domain for Zone permissions and the dashboard account name for Account permissions. Use `all` only when you intend to include every resource in that scope. Tokens expire after seven days by default.
 
 ## Deliver the token securely
 
@@ -42,7 +42,9 @@ cf-token --name 'DNS reporting' \
   --pipe-to your-secret-consumer
 ```
 
-The CLI starts the consumer before creating the token, passes the secret on stdin, suppresses the consumer's output, and checks its exit status. A consumer must exit nonzero if it cannot store or use the secret. For a shell pipeline, use `set -o pipefail` and `--stdout | your-secret-consumer`.
+The CLI starts the consumer before creating the token, passes the exact token bytes on stdin without a trailing newline, suppresses the consumer's output, and checks its exit status. A consumer must exit nonzero if it cannot store or use the secret. For a shell pipeline, use `set -o pipefail` and `--stdout | your-secret-consumer`.
+
+Add `--with-id` before `--pipe-to` (or alongside `--stdout`) to deliver a JSON object with `id` and `value` instead. The CLI fetches the ID from Cloudflare’s user-token verification endpoint. Treat the entire JSON payload as a secret.
 
 **For agents:** Prefer `--pipe-to` and use `--dry-run` until you know the intended scope and secret destination. Keep the secret out of chat, tool output, shell command arguments, and logs. Avoid `tee`, command substitution, and plaintext files.
 
@@ -54,7 +56,7 @@ For S3-compatible uploads to one bucket, use **R2 Object Storage → Manage API 
 
 ## TypeScript API
 
-From this repo after `npm ci`, import the built module. The API uses a discriminated union for `account`, `zone`, and `user` policies. Account and zone policies require a matching resource or `{ all: true }`. Permission group names match the dashboard and the API validates them before creation. The API returns the secret as a string. Pass it directly to your secret store or client and keep it out of logs.
+From this repo after `npm ci`, import the built module. The API uses a discriminated union for `account`, `zone`, and `user` policies. Account and zone policies require a matching resource or `{ all: true }`. Permission group names match the dashboard and the API validates them before creation. The API returns the secret as a string through `createUserToken`. Use `createUserTokenWithId` for `{ id, value }`. Pass it directly to your secret store or client and keep it out of logs.
 
 ```ts
 import { previewUserToken, type Options } from './dist/index.js'

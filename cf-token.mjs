@@ -6,7 +6,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { parseArgs } from 'node:util'
 
-import { accessLevels, createUserToken, previewUserToken } from './dist/index.js'
+import { accessLevels, createUserToken, createUserTokenWithId, previewUserToken } from './dist/index.js'
 
 const scopes = [
   {
@@ -48,6 +48,8 @@ for SCOPE and the dashboard's exact permission group and access labels.
   --zone DOMAIN      Restrict Zone permissions to this domain
   --expires DAYS     7 (default), 30, 90, 365, or never
   --dry-run          Open the dashboard summary without creating a token
+  --close-tab        Close the review tab after a dry run
+  --with-id          Deliver JSON with the token id and value
   --pipe-to COMMAND [ARG...]  Send the token directly to a trusted command (put last)
   --stdout           Send the token through a shell pipe to a trusted stdin consumer
   --help             Show this help
@@ -57,6 +59,7 @@ of that scope.
 
 To issue a token, prefer --pipe-to. The consumer receives the token on stdin.
 Its output is suppressed, and its exit status determines delivery success.
+The payload has no trailing newline.
 Keep the token out of chat, logs, and command arguments.
 
   cf-token --name "DNS reporting" --permission "Zone:DNS:Read" \\
@@ -96,6 +99,8 @@ function readOptions(args) {
       zone: { type: 'string' },
       expires: { type: 'string', default: '7' },
       'dry-run': { type: 'boolean' },
+      'close-tab': { type: 'boolean' },
+      'with-id': { type: 'boolean' },
       stdout: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -138,7 +143,21 @@ function readOptions(args) {
   if (values['dry-run'] && values.stdout) {
     throw new Error('Use either --dry-run or --stdout.')
   }
-  return { name: values.name.trim(), policies, expires, dryRun: values['dry-run'], stdout: values.stdout }
+  if (values['close-tab'] && !values['dry-run']) {
+    throw new Error('--close-tab requires --dry-run.')
+  }
+  if (values['with-id'] && values['dry-run']) {
+    throw new Error('--with-id requires token issuance.')
+  }
+  return {
+    name: values.name.trim(), policies, expires,
+    dryRun: values['dry-run'], closeTab: values['close-tab'], withId: values['with-id'], stdout: values.stdout,
+  }
+}
+
+async function issuePayload(options) {
+  if (options.withId) return JSON.stringify(await createUserTokenWithId(options))
+  return createUserToken(options)
 }
 
 async function issueToConsumer(options, [command, ...args]) {
@@ -155,8 +174,8 @@ async function issueToConsumer(options, [command, ...args]) {
       throw new Error('The --pipe-to command closed before token creation. No token was created.')
     }
 
-    const token = await createUserToken(options)
-    const delivered = await pipeline(Readable.from([token + '\n']), consumer.stdin)
+    const payload = await issuePayload(options)
+    const delivered = await pipeline(Readable.from([payload]), consumer.stdin)
       .then(() => true, () => false)
     const [code, signal] = await closed
     if (!delivered || code !== 0) {
@@ -191,17 +210,19 @@ async function main(args) {
   }
   if (!options) console.log(help)
   else if (options.dryRun) {
-    await previewUserToken(options)
-    console.error('Dry run. Review the token summary in Chrome.')
+    await previewUserToken(options, { closeTab: options.closeTab })
+    console.error(options.closeTab
+      ? 'Dry run complete. The summary tab was closed.'
+      : 'Dry run complete. The summary tab is open in Chrome. Close it after review, or use --close-tab next time.')
   } else if (consumer) {
     await issueToConsumer(options, consumer)
   } else {
     if (!options.stdout || !fstatSync(process.stdout.fd).isFIFO()) {
       throw new Error('Token creation requires --pipe-to COMMAND or --stdout with a pipe to a trusted stdin consumer. See --help.')
     }
-    const token = await createUserToken(options)
+    const payload = await issuePayload(options)
     try {
-      await pipeline(Readable.from([token + '\n']), process.stdout)
+      await pipeline(Readable.from([payload]), process.stdout)
     } catch {
       throw new Error('Cloudflare created the token, but delivery through the pipe failed. Check the token list before retrying.')
     }
