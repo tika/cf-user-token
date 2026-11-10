@@ -46,7 +46,7 @@ The CLI starts the consumer before creating the token, passes the secret on stdi
 
 **For agents:** Prefer `--pipe-to` and use `--dry-run` until you know the intended scope and secret destination. Keep the secret out of chat, tool output, shell command arguments, and logs. Avoid `tee`, command substitution, and plaintext files.
 
-Cloudflare shows the secret once. If issuance or delivery fails, check the dashboard and the destination before retrying. Revoke any token whose secret was lost or exposed.
+Cloudflare shows the secret once. After submission, the CLI waits up to 60 seconds for the success screen and reports which step failed. If issuance or delivery fails, check the dashboard and the destination before retrying. Revoke any token whose secret was lost or exposed.
 
 ## R2 bucket uploads
 

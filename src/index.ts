@@ -2,6 +2,7 @@ import { generateKeyPairSync, privateDecrypt } from 'node:crypto'
 import type { Page } from 'playwriter'
 
 const dashboard = 'https://dash.cloudflare.com/profile/api-tokens'
+const tokenReadTimeoutMs = 60_000
 
 const scopeLabels = { account: 'Account', zone: 'Zone', user: 'User' } as const
 export type Scope = keyof typeof scopeLabels
@@ -144,8 +145,19 @@ async function readToken(page: Page, publicKey: JsonWebKey, name: string) {
     }, false, ['encrypt'])
     const bytes = await crypto.subtle.encrypt('RSA-OAEP', key, new TextEncoder().encode(token))
     return btoa(String.fromCharCode(...new Uint8Array(bytes)))
-  }, { publicKey, name }, { timeout: 20000, polling: 300 })
+  }, { publicKey, name }, { timeout: tokenReadTimeoutMs, polling: 300 })
   return Buffer.from((await result.jsonValue()) as string, 'base64')
+}
+
+function postSubmitReason(cause: unknown): string {
+  if (!(cause instanceof Error)) return 'unknown error'
+  const timeout = /^(?:[a-z]+\.[a-z]+: )?Timeout (\d+)ms exceeded\b/i.exec(cause.message)
+  if (timeout) return `timeout after ${timeout[1]} ms`
+  if (cause.name === 'TimeoutError') return 'timeout'
+  if (cause.message.includes('Target page, context or browser has been closed')) return 'browser connection closed'
+  const { code } = cause as NodeJS.ErrnoException
+  if (code && /^ERR_OSSL_[A-Z0-9_]+$/.test(code)) return code
+  return 'unexpected error'
 }
 
 export async function previewUserToken(options: Options): Promise<void> {
@@ -184,14 +196,22 @@ async function run(options: Options, dryRun: boolean): Promise<string | void> {
     }
 
     keepTab = true
+    let stage = 'submitting the creation form'
     try {
       await create.click()
+      stage = 'waiting for and reading the token from the Cloudflare success screen'
       const ciphertext = await readToken(page, publicKey.export({ format: 'jwk' }), options.name)
+      stage = 'decrypting the token received from Chrome'
       const token = privateDecrypt({ key: privateKey, oaepHash: 'sha256' }, ciphertext)
       keepTab = false
       return token.toString('utf8')
-    } catch {
-      throw new Error('Could not retrieve the token after attempting creation. Check the Chrome tab before rerunning. Cloudflare may already have created it.')
+    } catch (cause) {
+      // Browser errors can include page content. Retain the cause for API callers.
+      const reason = postSubmitReason(cause)
+      throw new Error(
+        `Token issuance failed while ${stage} (${reason}). Cloudflare may have created the token. Check the Chrome tab before retrying.`,
+        { cause },
+      )
     }
   } finally {
     try {
